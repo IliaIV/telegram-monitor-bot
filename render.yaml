@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: telegram-monitor-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python telegram_monitor.py
+    envVars:
+      - key: BOT_TOKEN
+        value: "8470567669:AAHfluXsWl38wjRRkzj8MT2m4UYHl-J2NbA"
+      - key: API_ID
+        value: "20202213"
+      - key: API_HASH
+        value: "1d010061c439082c0d77d1aa7ed95830"
+      - key: SPREADSHEET_ID
+        value: "1sMvl_M1EnQ14e1AzV5x_HUfuJoR7ZL0ijlTY0mWCv88"
+      - key: SHEET_NAME
+        value: "ТТ-02.26"
+      - key: CHAT_IDS
+        value: "-1003849809374,-1003741393561"
+      - key: DRIVE_ROOT_FOLDER_ID
+        value: "1nO2L3HqshwZ7NzrGsrpuQf8ugBV43Za6"
+      - key: SERVICE_ACCOUNT_JSON
+        sync: false  # Будет задано вручную
