@@ -1,9 +1,9 @@
 """
-Версия: 3.2.0-Render (Релиз от 19.02.2026)
+Версия: 3.3.0-Render (Релиз от 19.02.2026)
 Изменения:
-- Исправлена ошибка invalid_grant при аутентификации Google
-- Улучшена обработка JSON из переменной окружения
-- Добавлена функция для очистки JSON от лишних символов
+- Исправлен порядок объявления функций
+- Все функции определены до их использования
+- Добавлены все необходимые импорты
 """
 
 import asyncio
@@ -22,6 +22,19 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from aiohttp import web
+
+# ============ ФУНКЦИИ ЛОГИРОВАНИЯ (ОПРЕДЕЛЕНЫ ПЕРВЫМИ) ============
+def log_info(message):
+    """Логирование информационных сообщений"""
+    logging.info(message)
+
+def log_error(message):
+    """Логирование ошибок"""
+    logging.error(f"[ERROR] {message}")
+
+def log_warn(message):
+    """Логирование предупреждений"""
+    logging.warning(f"[WARN] {message}")
 
 # ============ ФУНКЦИЯ ДЛЯ МОСКОВСКОГО ВРЕМЕНИ ============
 def get_moscow_time():
@@ -163,16 +176,6 @@ chats_cache = {}
 # Глобальные переменные
 bot_client = None
 web_app = None
-
-# ============ ФУНКЦИИ ЛОГИРОВАНИЯ ============
-def log_info(message):
-    logging.info(message)
-
-def log_error(message):
-    logging.error(f"[ERROR] {message}")
-
-def log_warn(message):
-    logging.warning(f"[WARN] {message}")
 
 # ============ ВЕБ-СЕРВЕР ДЛЯ ПИНГА ============
 async def handle_ping(request):
@@ -636,7 +639,7 @@ async def main():
     """Основная функция"""
     
     log_info("=" * 70)
-    log_info("Telegram Monitor Bot v3.2.0-Render")
+    log_info("Telegram Monitor Bot v3.3.0-Render")
     log_info("=" * 70)
     log_info(f"[INFO] Режим: Render.com Cloud")
     log_info(f"[INFO] Google таблица: {SPREADSHEET_ID}")
