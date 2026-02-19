@@ -1,9 +1,9 @@
 """
-Версия: 3.3.0-Render (Релиз от 19.02.2026)
+Версия: 3.4.0-Render (Релиз от 19.02.2026)
 Изменения:
-- Исправлен порядок объявления функций
-- Все функции определены до их использования
-- Добавлены все необходимые импорты
+- Убраны значения по умолчанию для переменных окружения
+- Все данные только из Environment Variables на Render
+- Добавлены проверки наличия обязательных переменных
 """
 
 import asyncio
@@ -23,48 +23,38 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from aiohttp import web
 
-# ============ ФУНКЦИИ ЛОГИРОВАНИЯ (ОПРЕДЕЛЕНЫ ПЕРВЫМИ) ============
+# ============ ФУНКЦИИ ЛОГИРОВАНИЯ ============
 def log_info(message):
-    """Логирование информационных сообщений"""
     logging.info(message)
 
 def log_error(message):
-    """Логирование ошибок"""
     logging.error(f"[ERROR] {message}")
 
 def log_warn(message):
-    """Логирование предупреждений"""
     logging.warning(f"[WARN] {message}")
 
 # ============ ФУНКЦИЯ ДЛЯ МОСКОВСКОГО ВРЕМЕНИ ============
 def get_moscow_time():
-    """Возвращает текущее время в часовом поясе Москвы (UTC+3)"""
     utc_time = datetime.now(timezone.utc)
     moscow_time = utc_time + timedelta(hours=3)
     return moscow_time
 
 def get_moscow_date_str():
-    """Возвращает текущую дату в формате ДД.ММ.ГГГГ (московское время)"""
     return get_moscow_time().strftime("%d.%m.%Y")
 
 def get_moscow_time_str():
-    """Возвращает текущее время в формате ЧЧ:ММ (московское время)"""
     return get_moscow_time().strftime("%H:%M")
 
 def get_moscow_datetime_str():
-    """Возвращает дату и время для логов (московское время)"""
     return get_moscow_time().strftime("%Y-%m-%d %H:%M:%S")
 
 # ============ НАСТРОЙКА ЛОГИРОВАНИЯ ============
-# Создаем папку для логов если её нет
 log_dir = os.path.join(os.path.dirname(__file__), 'logs')
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Формируем имя файла лога с датой и временем (московское)
 log_filename = os.path.join(log_dir, f'bot_{get_moscow_time().strftime("%Y%m%d_%H%M%S")}.log')
 
-# Кастомный форматтер для логов с московским временем
 class MoscowTimeFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
@@ -73,7 +63,6 @@ class MoscowTimeFormatter(logging.Formatter):
             return moscow_dt.strftime(datefmt)
         return moscow_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-# Настраиваем логирование
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(MoscowTimeFormatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
 
@@ -85,80 +74,70 @@ logging.basicConfig(
     handlers=[file_handler, handler]
 )
 
-# ============ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ============
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "8470567669:AAHfluXsWl38wjRRkzj8MT2m4UYHl-J2NbA")
-API_ID = int(os.environ.get('API_ID', '20202213'))
-API_HASH = os.environ.get('API_HASH', '1d010061c439082c0d77d1aa7ed95830')
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID', "1sMvl_M1EnQ14e1AzV5x_HUfuJoR7ZL0ijlTY0mWCv88")
-SHEET_NAME = os.environ.get('SHEET_NAME', "ТТ-02.26")
-DRIVE_ROOT_FOLDER_ID = os.environ.get('DRIVE_ROOT_FOLDER_ID', "1nO2L3HqshwZ7NzrGsrpuQf8ugBV43Za6")
+# ============ ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ============
+required_vars = [
+    'BOT_TOKEN',
+    'API_ID',
+    'API_HASH',
+    'SPREADSHEET_ID',
+    'SHEET_NAME',
+    'CHAT_IDS',
+    'DRIVE_ROOT_FOLDER_ID',
+    'SERVICE_ACCOUNT_JSON'
+]
 
-# Telegram группы
-CHAT_IDS_STR = os.environ.get('CHAT_IDS', "-1003849809374,-1003741393561")
+missing_vars = []
+for var in required_vars:
+    if not os.environ.get(var):
+        missing_vars.append(var)
+
+if missing_vars:
+    log_error(f"❌ ОТСУТСТВУЮТ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ: {', '.join(missing_vars)}")
+    log_error("Добавьте их в настройках Render → Environment")
+    sys.exit(1)
+
+# ============ ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ============
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+API_ID = int(os.environ.get('API_ID'))
+API_HASH = os.environ.get('API_HASH')
+SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+SHEET_NAME = os.environ.get('SHEET_NAME')
+DRIVE_ROOT_FOLDER_ID = os.environ.get('DRIVE_ROOT_FOLDER_ID')
+
+# Парсим ID групп
+CHAT_IDS_STR = os.environ.get('CHAT_IDS')
 CHAT_IDS = [int(x.strip()) for x in CHAT_IDS_STR.split(',')]
 
-# ============ ФУНКЦИЯ ДЛЯ ОЧИСТКИ JSON ============
-def clean_json_string(json_str):
-    """Очищает JSON строку от лишних символов и пробелов"""
-    if not json_str:
-        return None
-    
-    # Удаляем лишние пробелы в начале и конце
-    json_str = json_str.strip()
-    
-    # Удаляем BOM если есть
+# ============ ЗАГРУЗКА CREDENTIALS ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ ============
+SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
+SERVICE_ACCOUNT_FILE = '/tmp/credentials.json'
+
+try:
+    # Очищаем JSON от возможных проблем
+    json_str = SERVICE_ACCOUNT_JSON.strip()
     if json_str.startswith('\ufeff'):
         json_str = json_str[1:]
     
-    # Заменяем одинарные кавычки на двойные если нужно
-    if json_str.startswith("'") and json_str.endswith("'"):
-        json_str = json_str[1:-1]
+    # Парсим для проверки
+    json_data = json.loads(json_str)
+    log_info("[OK] JSON валидный")
     
-    # Удаляем лишние пробелы между ключами и значениями
-    json_str = re.sub(r'\s+', ' ', json_str)
+    # Сохраняем во временный файл
+    with open(SERVICE_ACCOUNT_FILE, 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, indent=2)
     
-    return json_str
-
-# ============ ЗАГРУЗКА CREDENTIALS ============
-SERVICE_ACCOUNT_FILE = None
-SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
-
-if SERVICE_ACCOUNT_JSON:
-    try:
-        # Очищаем JSON от возможных проблем
-        cleaned_json = clean_json_string(SERVICE_ACCOUNT_JSON)
-        
-        # Пробуем распарсить JSON для проверки
-        json_data = json.loads(cleaned_json)
-        log_info("[OK] JSON валидный, сохраняем во временный файл")
-        
-        # Сохраняем во временный файл
-        SERVICE_ACCOUNT_FILE = '/tmp/credentials.json'
-        with open(SERVICE_ACCOUNT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2)
-        
-        log_info(f"[OK] Файл сохранен: {SERVICE_ACCOUNT_FILE}")
-        
-    except json.JSONDecodeError as e:
-        log_error(f"Ошибка парсинга JSON: {e}")
-        log_error(f"Проблемный JSON: {SERVICE_ACCOUNT_JSON[:200]}...")
-        SERVICE_ACCOUNT_FILE = None
-    except Exception as e:
-        log_error(f"Неизвестная ошибка при обработке JSON: {e}")
-        SERVICE_ACCOUNT_FILE = None
-else:
-    # Если нет переменной окружения, ищем локальный файл
-    local_file = os.path.join(os.path.dirname(__file__), 'credentials.json')
-    if os.path.exists(local_file):
-        SERVICE_ACCOUNT_FILE = local_file
-        log_info(f"[OK] Используем локальный файл: {local_file}")
-    else:
-        log_error("Нет SERVICE_ACCOUNT_JSON и нет локального credentials.json")
-        SERVICE_ACCOUNT_FILE = None
+    log_info(f"[OK] Файл credentials.json создан: {SERVICE_ACCOUNT_FILE}")
+    
+except json.JSONDecodeError as e:
+    log_error(f"Ошибка парсинга JSON: {e}")
+    sys.exit(1)
+except Exception as e:
+    log_error(f"Ошибка при обработке JSON: {e}")
+    sys.exit(1)
 
 # ======================================
 
-# === КОНСТАНТЫ ДЛЯ ИНДЕКСОВ КОЛОНОК ===
+# === КОНСТАНТЫ ===
 COL = {
     'CHECKBOX': 1, 'DATE_OPENED': 2, 'TIME_OPENED': 3, 'DATE_CLOSED': 4,
     'TIME_CLOSED': 5, 'DURATION': 6, 'TT': 7, 'DISTRICT': 8, 'ADDRESS': 9,
@@ -167,23 +146,16 @@ COL = {
     'ORIGINAL_STATUS': 18
 }
 
-# Список округов
 DISTRICTS = ["ЮЗАО", "ЗАО", "ТРАО", "НМАО"]
-
-# Словарь для кэширования
 chats_cache = {}
-
-# Глобальные переменные
 bot_client = None
 web_app = None
 
-# ============ ВЕБ-СЕРВЕР ДЛЯ ПИНГА ============
+# ============ ВЕБ-СЕРВЕР ============
 async def handle_ping(request):
-    """Обработчик для пинга"""
     return web.Response(text=f"Bot is running! Moscow time: {get_moscow_datetime_str()}")
 
 async def start_web_server():
-    """Запуск веб-сервера"""
     global web_app
     web_app = web.Application()
     web_app.router.add_get('/ping', handle_ping)
@@ -196,34 +168,20 @@ async def start_web_server():
     log_info(f"[WEB] Сервер запущен на порту {port}")
 
 # ============ ФУНКЦИИ GOOGLE SHEETS ============
-def check_credentials_file():
-    """Проверка существования файла credentials.json"""
-    if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
-        log_info(f"[OK] Файл credentials.json найден: {SERVICE_ACCOUNT_FILE}")
-        return True
-    else:
-        log_error(f"Файл credentials.json НЕ найден")
-        return False
-
 def init_google_sheets():
-    """Инициализация Google Sheets API"""
     try:
-        if not check_credentials_file():
-            return None
-            
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
         service = build('sheets', 'v4', credentials=credentials)
-        log_info("[OK] Подключение к Google Sheets API установлено")
+        log_info("[OK] Подключение к Google Sheets API")
         return service.spreadsheets()
     except Exception as e:
-        log_error(f"Ошибка инициализации Google Sheets: {e}")
+        log_error(f"Ошибка Google Sheets: {e}")
         return None
 
 def get_last_row(sheets):
-    """Получение номера последней заполненной строки"""
     try:
         result = sheets.values().get(
             spreadsheetId=SPREADSHEET_ID,
@@ -232,11 +190,10 @@ def get_last_row(sheets):
         values = result.get('values', [])
         return len(values) + 1
     except Exception as e:
-        log_error(f"Ошибка получения последней строки: {e}")
+        log_error(f"Ошибка получения строки: {e}")
         return 1
 
 def get_sheet_id(sheets):
-    """Получение ID листа по имени"""
     try:
         spreadsheet = sheets.get(spreadsheetId=SPREADSHEET_ID).execute()
         sheets_list = spreadsheet.get('sheets', [])
@@ -250,7 +207,6 @@ def get_sheet_id(sheets):
         return 0
 
 def write_to_google_sheets(sheets, data, is_duplicate=False):
-    """Запись данных в Google таблицу"""
     try:
         next_row = get_last_row(sheets)
         
@@ -339,11 +295,10 @@ def write_to_google_sheets(sheets, data, is_duplicate=False):
         return next_row
         
     except HttpError as e:
-        log_error(f"Ошибка записи в Google Sheets: {e}")
+        log_error(f"Ошибка записи: {e}")
         return None
 
 def add_headers_if_needed(sheets):
-    """Добавление заголовков"""
     try:
         result = sheets.values().get(
             spreadsheetId=SPREADSHEET_ID,
@@ -362,13 +317,12 @@ def add_headers_if_needed(sheets):
                 valueInputOption='USER_ENTERED',
                 body={'values': headers}
             ).execute()
-            log_info("[OK] Заголовки добавлены в таблицу")
+            log_info("[OK] Заголовки добавлены")
     except Exception as e:
-        log_warn(f"Ошибка при проверке заголовков: {e}")
+        log_warn(f"Ошибка заголовков: {e}")
 
 # ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 def extract_district(address):
-    """Извлечение округа"""
     if not address:
         return ""
     for district in DISTRICTS:
@@ -377,7 +331,6 @@ def extract_district(address):
     return ""
 
 def get_user_display_name(sender):
-    """Получение имени пользователя"""
     if sender.first_name:
         if sender.last_name:
             return f"{sender.first_name} {sender.last_name}"
@@ -388,7 +341,6 @@ def get_user_display_name(sender):
         return f"User_{sender.id}"
 
 def parse_message_caption(caption):
-    """Парсинг сообщения"""
     lines = caption.split("\n")
     lines = [line.strip() for line in lines if line.strip()]
     tt = lines[0] if len(lines) > 0 else ""
@@ -397,7 +349,6 @@ def parse_message_caption(caption):
 
 # ============ ФУНКЦИИ TELEGRAM ============
 def send_telegram_message(user_id, text, parse_mode="HTML"):
-    """Отправка сообщения в Telegram"""
     import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": user_id, "text": text}
@@ -411,10 +362,9 @@ def send_telegram_message(user_id, text, parse_mode="HTML"):
         else:
             log_error(f"Ошибка отправки: {response.text}")
     except Exception as e:
-        log_error(f"Ошибка при отправке: {e}")
+        log_error(f"Ошибка: {e}")
 
 def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=False, chat_title=""):
-    """Отправка подтверждения"""
     message_text = f"Данные приняты"
     if chat_title:
         message_text += f" из чата {chat_title}"
@@ -434,7 +384,6 @@ def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=F
     send_telegram_message(user_id, message_text)
 
 def check_for_duplicate(sheets, tt, address):
-    """Проверка дубликатов"""
     try:
         result = sheets.values().get(
             spreadsheetId=SPREADSHEET_ID,
@@ -454,7 +403,6 @@ def check_for_duplicate(sheets, tt, address):
         return False
 
 def upload_photo_to_drive(photo_data, message_id):
-    """Загрузка фото в Google Drive"""
     try:
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE,
@@ -465,9 +413,8 @@ def upload_photo_to_drive(photo_data, message_id):
         now = get_moscow_time()
         folder_name = now.strftime("%d-%m-%Y")
         
-        log_info(f"[INFO] Поиск/создание папки: {folder_name}")
+        log_info(f"[INFO] Поиск папки: {folder_name}")
         
-        # Поиск папки
         query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and '{DRIVE_ROOT_FOLDER_ID}' in parents and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)").execute()
         folders = results.get('files', [])
@@ -476,7 +423,6 @@ def upload_photo_to_drive(photo_data, message_id):
             folder_id = folders[0]['id']
             log_info(f"   [OK] Найдена папка")
         else:
-            # Создание папки
             file_metadata = {
                 'name': folder_name,
                 'mimeType': 'application/vnd.google-apps.folder',
@@ -486,7 +432,6 @@ def upload_photo_to_drive(photo_data, message_id):
             folder_id = folder.get('id')
             log_info(f"   [OK] Создана папка")
         
-        # Загрузка файла
         file_name = now.strftime("%H%M") + ".jpg"
         file_metadata = {
             'name': file_name,
@@ -503,7 +448,6 @@ def upload_photo_to_drive(photo_data, message_id):
         file_id = file.get('id')
         web_view_link = file.get('webViewLink')
         
-        # Открываем доступ
         permission = {
             'type': 'anyone',
             'role': 'reader'
@@ -513,7 +457,7 @@ def upload_photo_to_drive(photo_data, message_id):
             body=permission
         ).execute()
         
-        log_info(f"   [OK] Файл загружен, ID: {file_id}")
+        log_info(f"   [OK] Файл загружен")
         return web_view_link
         
     except Exception as e:
@@ -522,7 +466,6 @@ def upload_photo_to_drive(photo_data, message_id):
 
 # ============ ОБРАБОТЧИК СООБЩЕНИЙ ============
 async def message_handler(event):
-    """Обработка новых сообщений"""
     message = event.message
     sender = await event.get_sender()
     chat = await event.get_chat()
@@ -531,11 +474,10 @@ async def message_handler(event):
     chat_id = event.chat_id
     message_id = message.id
     chat_title = getattr(chat, 'title', f'Чат {chat_id}')
-    
     display_name = get_user_display_name(sender)
     
     log_info(f"\n{'='*60}")
-    log_info(f"[IN] Новое сообщение из чата '{chat_title}' от {display_name}")
+    log_info(f"[IN] Сообщение из '{chat_title}' от {display_name}")
     
     sheets = init_google_sheets()
     if not sheets:
@@ -577,7 +519,7 @@ async def message_handler(event):
         write_to_google_sheets(sheets, row_data, is_duplicate)
         send_confirmation(user_id, tt, address, district, "", is_duplicate, chat_title)
     
-    # Фото с подписью
+    # Фото
     elif message.photo:
         caption = message.caption or "(Без подписи)"
         log_info(f"[PHOTO] Подпись: {caption[:100]}")
@@ -585,11 +527,10 @@ async def message_handler(event):
         tt, address = parse_message_caption(caption)
         
         if not tt or not address:
-            error_msg = "Ошибка: Не хватает данных в подписи.\n1 строка - TT\n2 строка - Адрес"
+            error_msg = "Ошибка: Не хватает данных в подписи"
             send_telegram_message(user_id, error_msg, parse_mode=None)
             return
         
-        # Скачиваем фото
         file_path = await message.download_media(file=f"/tmp/temp_photo_{message_id}.jpg")
         
         drive_file_url = ""
@@ -601,7 +542,6 @@ async def message_handler(event):
                 photo_data = f.read()
             
             drive_file_url = upload_photo_to_drive(photo_data, message_id)
-            
             os.remove(file_path)
             log_info(f"   [OK] Временный файл удален")
         else:
@@ -636,12 +576,9 @@ async def message_handler(event):
 
 # ============ ОСНОВНАЯ ФУНКЦИЯ ============
 async def main():
-    """Основная функция"""
-    
     log_info("=" * 70)
-    log_info("Telegram Monitor Bot v3.3.0-Render")
+    log_info("Telegram Monitor Bot v3.4.0-Render")
     log_info("=" * 70)
-    log_info(f"[INFO] Режим: Render.com Cloud")
     log_info(f"[INFO] Google таблица: {SPREADSHEET_ID}")
     log_info(f"[INFO] Лист: {SHEET_NAME}")
     log_info("[INFO] Telegram группы:")
@@ -649,65 +586,53 @@ async def main():
         log_info(f"   {i}. ID: {chat_id}")
     log_info("=" * 70)
     
-    # Проверяем наличие credentials
-    if not SERVICE_ACCOUNT_FILE:
-        log_error("Нет файла credentials.json! Бот не может работать без доступа к Google Sheets.")
-        return
-    
-    # Запускаем веб-сервер
     await start_web_server()
     
-    # Создаем клиента Telegram
     client = TelegramClient('bot_session', API_ID, API_HASH)
     
     try:
         await client.start(bot_token=BOT_TOKEN)
-        log_info("[OK] Бот успешно подключился к Telegram")
+        log_info("[OK] Бот подключился к Telegram")
         
-        # Проверяем Google Sheets
         sheets = init_google_sheets()
         if sheets:
             add_headers_if_needed(sheets)
-            log_info("[OK] Подключение к Google Sheets установлено")
+            log_info("[OK] Подключение к Google Sheets")
         else:
-            log_error("Не удалось подключиться к Google Sheets")
+            log_error("Ошибка подключения к Google Sheets")
             return
         
-        # Проверяем доступ к чатам
         successful_chats = []
         for chat_id in CHAT_IDS:
             try:
                 chat = await client.get_entity(chat_id)
-                chat_title = getattr(chat, 'title', f'Чат {chat_id}')
-                log_info(f"[OK] Подключено к чату: {chat_title}")
+                log_info(f"[OK] Подключено к чату: {getattr(chat, 'title', chat_id)}")
                 successful_chats.append(chat_id)
             except Exception as e:
                 log_error(f"Нет доступа к чату {chat_id}: {e}")
         
         if not successful_chats:
-            log_error("Нет доступных чатов для мониторинга")
+            log_error("Нет доступных чатов")
             return
         
-        # Регистрируем обработчик
         @client.on(events.NewMessage(chats=successful_chats))
         async def handler(event):
             await message_handler(event)
         
-        log_info(f"\n[OK] Мониторинг {len(successful_chats)} чатов запущен")
-        log_info("[INFO] Сервер пинга активен")
+        log_info(f"\n[OK] Мониторинг {len(successful_chats)} чатов")
         log_info("[INFO] Ctrl+C для остановки")
         log_info("-" * 70)
         
         await client.run_until_disconnected()
         
     except KeyboardInterrupt:
-        log_info("\n[STOP] Мониторинг остановлен пользователем")
+        log_info("\n[STOP] Остановлено")
     except Exception as e:
         log_error(f"{e}")
         traceback.print_exc()
     finally:
         await client.disconnect()
-        log_info("[OK] Отключено от Telegram")
+        log_info("[OK] Отключено")
 
 # ============ ТОЧКА ВХОДА ============
 if __name__ == '__main__':
