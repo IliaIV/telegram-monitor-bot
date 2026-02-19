@@ -1,10 +1,9 @@
 """
-Версия: 3.0.0-Render (Релиз от 19.02.2026)
+Версия: 3.2.0-Render (Релиз от 19.02.2026)
 Изменения:
-- Адаптация для Render.com
-- Использование переменных окружения
-- Добавлен веб-сервер для пинга
-- Автоматическое определение путей
+- Исправлена ошибка invalid_grant при аутентификации Google
+- Улучшена обработка JSON из переменной окружения
+- Добавлена функция для очистки JSON от лишних символов
 """
 
 import asyncio
@@ -14,13 +13,34 @@ import io
 import sys
 import logging
 import traceback
+import json
+import re
+from datetime import datetime, timezone, timedelta
 from telethon import TelegramClient, events
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from aiohttp import web
-import json
+
+# ============ ФУНКЦИЯ ДЛЯ МОСКОВСКОГО ВРЕМЕНИ ============
+def get_moscow_time():
+    """Возвращает текущее время в часовом поясе Москвы (UTC+3)"""
+    utc_time = datetime.now(timezone.utc)
+    moscow_time = utc_time + timedelta(hours=3)
+    return moscow_time
+
+def get_moscow_date_str():
+    """Возвращает текущую дату в формате ДД.ММ.ГГГГ (московское время)"""
+    return get_moscow_time().strftime("%d.%m.%Y")
+
+def get_moscow_time_str():
+    """Возвращает текущее время в формате ЧЧ:ММ (московское время)"""
+    return get_moscow_time().strftime("%H:%M")
+
+def get_moscow_datetime_str():
+    """Возвращает дату и время для логов (московское время)"""
+    return get_moscow_time().strftime("%Y-%m-%d %H:%M:%S")
 
 # ============ НАСТРОЙКА ЛОГИРОВАНИЯ ============
 # Создаем папку для логов если её нет
@@ -28,22 +48,31 @@ log_dir = os.path.join(os.path.dirname(__file__), 'logs')
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Формируем имя файла лога с датой и временем
-log_filename = os.path.join(log_dir, f'bot_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+# Формируем имя файла лога с датой и временем (московское)
+log_filename = os.path.join(log_dir, f'bot_{get_moscow_time().strftime("%Y%m%d_%H%M%S")}.log')
+
+# Кастомный форматтер для логов с московским временем
+class MoscowTimeFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        moscow_dt = dt + timedelta(hours=3)
+        if datefmt:
+            return moscow_dt.strftime(datefmt)
+        return moscow_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 # Настраиваем логирование
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(MoscowTimeFormatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
+file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+file_handler.setFormatter(MoscowTimeFormatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_filename, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[file_handler, handler]
 )
 
 # ============ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ============
-# На Render.com все секреты хранятся в переменных окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN', "8470567669:AAHfluXsWl38wjRRkzj8MT2m4UYHl-J2NbA")
 API_ID = int(os.environ.get('API_ID', '20202213'))
 API_HASH = os.environ.get('API_HASH', '1d010061c439082c0d77d1aa7ed95830')
@@ -51,20 +80,68 @@ SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID', "1sMvl_M1EnQ14e1AzV5x_HUfuJoR7
 SHEET_NAME = os.environ.get('SHEET_NAME', "ТТ-02.26")
 DRIVE_ROOT_FOLDER_ID = os.environ.get('DRIVE_ROOT_FOLDER_ID', "1nO2L3HqshwZ7NzrGsrpuQf8ugBV43Za6")
 
-# Путь к файлу с учетными данными Google Service Account
-# На Render можно загрузить файл или передать содержимое через переменную окружения
-SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
-if SERVICE_ACCOUNT_JSON:
-    # Если передан JSON как строка, сохраняем его во временный файл
-    SERVICE_ACCOUNT_FILE = '/tmp/credentials.json'
-    with open(SERVICE_ACCOUNT_FILE, 'w') as f:
-        f.write(SERVICE_ACCOUNT_JSON)
-else:
-    SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'credentials.json')
-
-# Telegram группы (числовые ID)
+# Telegram группы
 CHAT_IDS_STR = os.environ.get('CHAT_IDS', "-1003849809374,-1003741393561")
 CHAT_IDS = [int(x.strip()) for x in CHAT_IDS_STR.split(',')]
+
+# ============ ФУНКЦИЯ ДЛЯ ОЧИСТКИ JSON ============
+def clean_json_string(json_str):
+    """Очищает JSON строку от лишних символов и пробелов"""
+    if not json_str:
+        return None
+    
+    # Удаляем лишние пробелы в начале и конце
+    json_str = json_str.strip()
+    
+    # Удаляем BOM если есть
+    if json_str.startswith('\ufeff'):
+        json_str = json_str[1:]
+    
+    # Заменяем одинарные кавычки на двойные если нужно
+    if json_str.startswith("'") and json_str.endswith("'"):
+        json_str = json_str[1:-1]
+    
+    # Удаляем лишние пробелы между ключами и значениями
+    json_str = re.sub(r'\s+', ' ', json_str)
+    
+    return json_str
+
+# ============ ЗАГРУЗКА CREDENTIALS ============
+SERVICE_ACCOUNT_FILE = None
+SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
+
+if SERVICE_ACCOUNT_JSON:
+    try:
+        # Очищаем JSON от возможных проблем
+        cleaned_json = clean_json_string(SERVICE_ACCOUNT_JSON)
+        
+        # Пробуем распарсить JSON для проверки
+        json_data = json.loads(cleaned_json)
+        log_info("[OK] JSON валидный, сохраняем во временный файл")
+        
+        # Сохраняем во временный файл
+        SERVICE_ACCOUNT_FILE = '/tmp/credentials.json'
+        with open(SERVICE_ACCOUNT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2)
+        
+        log_info(f"[OK] Файл сохранен: {SERVICE_ACCOUNT_FILE}")
+        
+    except json.JSONDecodeError as e:
+        log_error(f"Ошибка парсинга JSON: {e}")
+        log_error(f"Проблемный JSON: {SERVICE_ACCOUNT_JSON[:200]}...")
+        SERVICE_ACCOUNT_FILE = None
+    except Exception as e:
+        log_error(f"Неизвестная ошибка при обработке JSON: {e}")
+        SERVICE_ACCOUNT_FILE = None
+else:
+    # Если нет переменной окружения, ищем локальный файл
+    local_file = os.path.join(os.path.dirname(__file__), 'credentials.json')
+    if os.path.exists(local_file):
+        SERVICE_ACCOUNT_FILE = local_file
+        log_info(f"[OK] Используем локальный файл: {local_file}")
+    else:
+        log_error("Нет SERVICE_ACCOUNT_JSON и нет локального credentials.json")
+        SERVICE_ACCOUNT_FILE = None
 
 # ======================================
 
@@ -83,7 +160,7 @@ DISTRICTS = ["ЮЗАО", "ЗАО", "ТРАО", "НМАО"]
 # Словарь для кэширования
 chats_cache = {}
 
-# Глобальные переменные для клиента и задач
+# Глобальные переменные
 bot_client = None
 web_app = None
 
@@ -99,27 +176,15 @@ def log_warn(message):
 
 # ============ ВЕБ-СЕРВЕР ДЛЯ ПИНГА ============
 async def handle_ping(request):
-    """Обработчик для пинга (чтобы Render не засыпал)"""
-    return web.Response(text=f"Bot is running! Time: {datetime.datetime.now()}")
-
-async def handle_webhook(request):
-    """Обработчик вебхуков от Telegram (на будущее)"""
-    try:
-        data = await request.json()
-        log_info(f"Webhook received: {json.dumps(data)[:200]}")
-        return web.Response(text="OK")
-    except Exception as e:
-        log_error(f"Webhook error: {e}")
-        return web.Response(status=500, text=str(e))
+    """Обработчик для пинга"""
+    return web.Response(text=f"Bot is running! Moscow time: {get_moscow_datetime_str()}")
 
 async def start_web_server():
     """Запуск веб-сервера"""
     global web_app
     web_app = web.Application()
     web_app.router.add_get('/ping', handle_ping)
-    web_app.router.add_post('/webhook', handle_webhook)
     
-    # Render задает порт через переменную окружения PORT
     port = int(os.environ.get('PORT', 10000))
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -130,11 +195,11 @@ async def start_web_server():
 # ============ ФУНКЦИИ GOOGLE SHEETS ============
 def check_credentials_file():
     """Проверка существования файла credentials.json"""
-    if os.path.exists(SERVICE_ACCOUNT_FILE):
-        log_info(f"[OK] Файл credentials.json найден")
+    if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        log_info(f"[OK] Файл credentials.json найден: {SERVICE_ACCOUNT_FILE}")
         return True
     else:
-        log_error(f"Файл credentials.json НЕ найден: {SERVICE_ACCOUNT_FILE}")
+        log_error(f"Файл credentials.json НЕ найден")
         return False
 
 def init_google_sheets():
@@ -196,7 +261,7 @@ def write_to_google_sheets(sheets, data, is_duplicate=False):
             body=body
         ).execute()
         
-        # Установка флажков и форматирования
+        # Установка флажков
         sheet_id = get_sheet_id(sheets)
         requests = []
         
@@ -394,7 +459,7 @@ def upload_photo_to_drive(photo_data, message_id):
         )
         drive_service = build('drive', 'v3', credentials=credentials)
         
-        now = datetime.datetime.now()
+        now = get_moscow_time()
         folder_name = now.strftime("%d-%m-%Y")
         
         log_info(f"[INFO] Поиск/создание папки: {folder_name}")
@@ -489,9 +554,8 @@ async def message_handler(event):
         district = extract_district(address)
         is_duplicate = check_for_duplicate(sheets, tt, address)
         
-        now = datetime.datetime.now()
-        current_date = now.strftime("%d.%m.%Y")
-        current_time = now.strftime("%H:%M")
+        current_date = get_moscow_date_str()
+        current_time = get_moscow_time_str()
         
         row_data = [''] * 18
         row_data[COL['DATE_OPENED']-1] = current_date
@@ -543,9 +607,8 @@ async def message_handler(event):
         district = extract_district(address)
         is_duplicate = check_for_duplicate(sheets, tt, address)
         
-        now = datetime.datetime.now()
-        current_date = now.strftime("%d.%m.%Y")
-        current_time = now.strftime("%H:%M")
+        current_date = get_moscow_date_str()
+        current_time = get_moscow_time_str()
         
         row_data = [''] * 18
         row_data[COL['DATE_OPENED']-1] = current_date
@@ -573,7 +636,7 @@ async def main():
     """Основная функция"""
     
     log_info("=" * 70)
-    log_info("Telegram Monitor Bot v3.0.0-Render")
+    log_info("Telegram Monitor Bot v3.2.0-Render")
     log_info("=" * 70)
     log_info(f"[INFO] Режим: Render.com Cloud")
     log_info(f"[INFO] Google таблица: {SPREADSHEET_ID}")
@@ -583,7 +646,12 @@ async def main():
         log_info(f"   {i}. ID: {chat_id}")
     log_info("=" * 70)
     
-    # Запускаем веб-сервер для пинга
+    # Проверяем наличие credentials
+    if not SERVICE_ACCOUNT_FILE:
+        log_error("Нет файла credentials.json! Бот не может работать без доступа к Google Sheets.")
+        return
+    
+    # Запускаем веб-сервер
     await start_web_server()
     
     # Создаем клиента Telegram
@@ -623,11 +691,10 @@ async def main():
             await message_handler(event)
         
         log_info(f"\n[OK] Мониторинг {len(successful_chats)} чатов запущен")
-        log_info("[INFO] Сервер пинга активен на порту " + os.environ.get('PORT', '10000'))
+        log_info("[INFO] Сервер пинга активен")
         log_info("[INFO] Ctrl+C для остановки")
         log_info("-" * 70)
         
-        # Бесконечное ожидание
         await client.run_until_disconnected()
         
     except KeyboardInterrupt:
