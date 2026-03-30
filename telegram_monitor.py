@@ -1,9 +1,9 @@
 """
-Версия: 3.4.0-Render (Релиз от 19.02.2026)
+Версия: 3.5.0-Render (Релиз от 30.03.2026)
 Изменения:
-- Убраны значения по умолчанию для переменных окружения
-- Все данные только из Environment Variables на Render
-- Добавлены проверки наличия обязательных переменных
+- Добавлена проверка адреса в листе "Обследование МКД"
+- Функция check_address_in_mkd() для поиска адреса в столбце D
+- При нахождении адреса в таблице добавляется комментарий в колонку M
 """
 
 import asyncio
@@ -104,6 +104,9 @@ SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
 SHEET_NAME = os.environ.get('SHEET_NAME')
 DRIVE_ROOT_FOLDER_ID = os.environ.get('DRIVE_ROOT_FOLDER_ID')
 
+# Добавляем имя листа для проверки адресов
+MKD_SHEET_NAME = "Обследование МКД"
+
 # Парсим ID групп
 CHAT_IDS_STR = os.environ.get('CHAT_IDS')
 CHAT_IDS = [int(x.strip()) for x in CHAT_IDS_STR.split(',')]
@@ -113,16 +116,13 @@ SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 SERVICE_ACCOUNT_FILE = '/tmp/credentials.json'
 
 try:
-    # Очищаем JSON от возможных проблем
     json_str = SERVICE_ACCOUNT_JSON.strip()
     if json_str.startswith('\ufeff'):
         json_str = json_str[1:]
     
-    # Парсим для проверки
     json_data = json.loads(json_str)
     log_info("[OK] JSON валидный")
     
-    # Сохраняем во временный файл
     with open(SERVICE_ACCOUNT_FILE, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, indent=2)
     
@@ -146,10 +146,88 @@ COL = {
     'ORIGINAL_STATUS': 18
 }
 
+# Колонки для листа "Обследование МКД"
+MKD_COL = {
+    'ADDRESS': 4  # Столбец D (индекс 4, так как счет с 1)
+}
+
 DISTRICTS = ["ЮЗАО", "ЗАО", "ТРАО", "НМАО"]
 chats_cache = {}
 bot_client = None
 web_app = None
+
+# Кэш для адресов из МКД, чтобы не запрашивать каждый раз
+mkd_addresses_cache = None
+mkd_addresses_cache_time = None
+CACHE_DURATION = 3600  # Кэш на 1 час
+
+# ============ ФУНКЦИЯ ПРОВЕРКИ АДРЕСА В МКД ============
+def load_mkd_addresses(sheets):
+    """Загружает все адреса из листа Обследование МКД (столбец D)"""
+    global mkd_addresses_cache, mkd_addresses_cache_time
+    
+    # Проверяем кэш
+    current_time = datetime.now().timestamp()
+    if mkd_addresses_cache is not None and mkd_addresses_cache_time is not None:
+        if current_time - mkd_addresses_cache_time < CACHE_DURATION:
+            log_info("[MKD] Использую кэшированные адреса")
+            return mkd_addresses_cache
+    
+    try:
+        log_info(f"[MKD] Загрузка адресов из листа '{MKD_SHEET_NAME}', столбец D")
+        
+        # Получаем все данные из столбца D
+        result = sheets.values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f'{MKD_SHEET_NAME}!D:D'
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        # Извлекаем адреса (пропускаем заголовок, если есть)
+        addresses = []
+        for row in values:
+            if row and len(row) > 0:
+                address = row[0].strip()
+                if address and address.lower() != "адрес" and address.lower() != "address":
+                    addresses.append(address)
+        
+        log_info(f"[MKD] Загружено {len(addresses)} адресов")
+        
+        # Сохраняем в кэш
+        mkd_addresses_cache = addresses
+        mkd_addresses_cache_time = current_time
+        
+        return addresses
+        
+    except Exception as e:
+        log_error(f"[MKD] Ошибка загрузки адресов: {e}")
+        return []
+
+def check_address_in_mkd(sheets, address):
+    """Проверяет наличие адреса в листе Обследование МКД (столбец D)"""
+    if not address:
+        return False, None
+    
+    addresses = load_mkd_addresses(sheets)
+    
+    # Очищаем адрес от лишних пробелов и приводим к нижнему регистру для сравнения
+    clean_address = re.sub(r'\s+', ' ', address.strip().lower())
+    
+    for mkd_address in addresses:
+        clean_mkd = re.sub(r'\s+', ' ', mkd_address.lower())
+        
+        # Проверяем полное совпадение или частичное вхождение
+        if clean_address == clean_mkd:
+            log_info(f"[MKD] Найдено точное совпадение: {address}")
+            return True, mkd_address
+        elif clean_mkd in clean_address or clean_address in clean_mkd:
+            # Если адрес содержит часть из МКД или наоборот
+            log_info(f"[MKD] Найдено частичное совпадение: '{address}' ~ '{mkd_address}'")
+            return True, mkd_address
+    
+    log_info(f"[MKD] Адрес не найден: {address}")
+    return False, None
 
 # ============ ВЕБ-СЕРВЕР ============
 async def handle_ping(request):
@@ -206,9 +284,33 @@ def get_sheet_id(sheets):
         log_error(f"Ошибка получения sheetId: {e}")
         return 0
 
-def write_to_google_sheets(sheets, data, is_duplicate=False):
+def update_comment_cell(sheets, row, comment_text):
+    """Обновляет комментарий в колонке M (COMMENT) для указанной строки"""
+    try:
+        range_name = f'{SHEET_NAME}!M{row}'
+        body = {'values': [[comment_text]]}
+        
+        sheets.values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=range_name,
+            valueInputOption='USER_ENTERED',
+            body=body
+        ).execute()
+        log_info(f"[MKD] Комментарий добавлен в строку {row}: {comment_text[:50]}...")
+        return True
+    except Exception as e:
+        log_error(f"Ошибка добавления комментария: {e}")
+        return False
+
+def write_to_google_sheets(sheets, data, is_duplicate=False, mkd_comment=None):
+    """Запись данных в Google таблицу"""
     try:
         next_row = get_last_row(sheets)
+        
+        # Если есть комментарий от МКД, добавляем его в колонку M
+        if mkd_comment:
+            data[COL['COMMENT']-1] = mkd_comment
+            log_info(f"[MKD] Добавлен комментарий: {mkd_comment}")
         
         range_name = f'{SHEET_NAME}!A{next_row}:R{next_row}'
         body = {'values': [data]}
@@ -364,7 +466,8 @@ def send_telegram_message(user_id, text, parse_mode="HTML"):
     except Exception as e:
         log_error(f"Ошибка: {e}")
 
-def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=False, chat_title=""):
+def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=False, chat_title="", mkd_found=False, mkd_address=None):
+    """Отправка подтверждения с учетом информации о МКД"""
     message_text = f"Данные приняты"
     if chat_title:
         message_text += f" из чата {chat_title}"
@@ -380,6 +483,12 @@ def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=F
         message_text += f'Фото: {photo_link}\n'
     if is_duplicate:
         message_text += f"\n⚠️ Это дублирующаяся заявка!"
+    
+    # Добавляем информацию о МКД
+    if mkd_found:
+        message_text += f"\n📌 Адрес найден в списке МКД!"
+        if mkd_address:
+            message_text += f"\n   (в списке: {mkd_address})"
     
     send_telegram_message(user_id, message_text)
 
@@ -499,6 +608,10 @@ async def message_handler(event):
         district = extract_district(address)
         is_duplicate = check_for_duplicate(sheets, tt, address)
         
+        # Проверяем наличие адреса в МКД
+        mkd_found, mkd_address = check_address_in_mkd(sheets, address)
+        mkd_comment = f"МКД: {mkd_address}" if mkd_found else None
+        
         current_date = get_moscow_date_str()
         current_time = get_moscow_time_str()
         
@@ -516,8 +629,9 @@ async def message_handler(event):
             row_data[COL['STATUS']-1] = "Возврат"
             row_data[COL['ORIGINAL_STATUS']-1] = "Возврат"
         
-        write_to_google_sheets(sheets, row_data, is_duplicate)
-        send_confirmation(user_id, tt, address, district, "", is_duplicate, chat_title)
+        # Записываем с комментарием, если найден в МКД
+        write_to_google_sheets(sheets, row_data, is_duplicate, mkd_comment)
+        send_confirmation(user_id, tt, address, district, "", is_duplicate, chat_title, mkd_found, mkd_address)
     
     # Фото
     elif message.photo:
@@ -550,6 +664,10 @@ async def message_handler(event):
         district = extract_district(address)
         is_duplicate = check_for_duplicate(sheets, tt, address)
         
+        # Проверяем наличие адреса в МКД
+        mkd_found, mkd_address = check_address_in_mkd(sheets, address)
+        mkd_comment = f"МКД: {mkd_address}" if mkd_found else None
+        
         current_date = get_moscow_date_str()
         current_time = get_moscow_time_str()
         
@@ -568,8 +686,8 @@ async def message_handler(event):
             row_data[COL['STATUS']-1] = "Возврат"
             row_data[COL['ORIGINAL_STATUS']-1] = "Возврат"
         
-        write_to_google_sheets(sheets, row_data, is_duplicate)
-        send_confirmation(user_id, tt, address, district, drive_file_url, is_duplicate, chat_title)
+        write_to_google_sheets(sheets, row_data, is_duplicate, mkd_comment)
+        send_confirmation(user_id, tt, address, district, drive_file_url, is_duplicate, chat_title, mkd_found, mkd_address)
     
     else:
         log_info("[INFO] Другой тип сообщения")
@@ -577,10 +695,11 @@ async def message_handler(event):
 # ============ ОСНОВНАЯ ФУНКЦИЯ ============
 async def main():
     log_info("=" * 70)
-    log_info("Telegram Monitor Bot v3.4.0-Render")
+    log_info("Telegram Monitor Bot v3.5.0-Render")
     log_info("=" * 70)
     log_info(f"[INFO] Google таблица: {SPREADSHEET_ID}")
-    log_info(f"[INFO] Лист: {SHEET_NAME}")
+    log_info(f"[INFO] Лист ТТ: {SHEET_NAME}")
+    log_info(f"[INFO] Лист МКД: {MKD_SHEET_NAME} (столбец D)")
     log_info("[INFO] Telegram группы:")
     for i, chat_id in enumerate(CHAT_IDS, 1):
         log_info(f"   {i}. ID: {chat_id}")
@@ -597,6 +716,8 @@ async def main():
         sheets = init_google_sheets()
         if sheets:
             add_headers_if_needed(sheets)
+            # Предварительно загружаем адреса из МКД в кэш
+            load_mkd_addresses(sheets)
             log_info("[OK] Подключение к Google Sheets")
         else:
             log_error("Ошибка подключения к Google Sheets")
