@@ -318,24 +318,76 @@ def check_and_mark_address_in_mkd(sheets, address):
     if not addresses_with_rows:
         return False, None
     
+    # Извлекаем номер дома из адреса для точного сравнения
+    # Паттерн для поиска номера дома: может быть "5", "5/2", "5 корп. 2" и т.д.
+    house_pattern = r',\s*(\d+(?:[\/\-]\d+)?(?:\s*корп\.?\s*\d+)?(?:\s*стр\.?\s*\d+)?)\s*(?:[,\n]|$)'
+    
+    house_match = re.search(house_pattern, cleaned_address)
+    house_number = house_match.group(1) if house_match else ""
+    
+    # Получаем улицу без номера дома для дополнительной проверки
+    street_part = re.sub(house_pattern, '', cleaned_address) if house_match else cleaned_address
+    street_part = re.sub(r',\s*$', '', street_part).strip()
+    
+    log_info(f"[MKD] Поиск по адресу: улица='{street_part}', дом='{house_number}'")
+    
     # Нормализуем очищенный адрес
     clean_addr = re.sub(r'\s+', ' ', cleaned_address.strip().lower())
+    
+    best_match = None
+    best_match_score = 0
     
     for item in addresses_with_rows:
         # Пропускаем уже выполненные
         if item['status'] == 'выполнено':
             continue
-            
+        
         clean_mkd = re.sub(r'\s+', ' ', item['address'].lower())
         
-        # Проверяем совпадение
-        if clean_addr == clean_mkd or clean_mkd in clean_addr or clean_addr in clean_mkd:
-            log_info(f"[MKD] Найдено совпадение: '{item['address']}' (строка {item['row']})")
-            
-            # Обновляем статус в МКД
-            update_mkd_status(sheets, item['row'])
-            
-            return True, item['address']
+        # Извлекаем номер дома из адреса МКД
+        mkd_house_match = re.search(house_pattern, clean_mkd)
+        mkd_house = mkd_house_match.group(1) if mkd_house_match else ""
+        
+        # Получаем улицу без номера дома
+        mkd_street = re.sub(house_pattern, '', clean_mkd) if mkd_house_match else clean_mkd
+        mkd_street = re.sub(r',\s*$', '', mkd_street).strip()
+        
+        # Вычисляем score совпадения
+        score = 0
+        
+        # Проверка на полное совпадение (наивысший приоритет)
+        if clean_addr == clean_mkd:
+            score = 100
+            log_info(f"[MKD] Полное совпадение: {item['address']}")
+        # Проверка совпадения улицы и номера дома
+        elif street_part == mkd_street and house_number == mkd_house:
+            score = 90
+            log_info(f"[MKD] Совпадение улицы и дома: '{street_part}', '{house_number}'")
+        # Проверка совпадения улицы (если номера домов не указаны в одном из адресов)
+        elif street_part == mkd_street and (not house_number or not mkd_house):
+            score = 70
+            log_info(f"[MKD] Совпадение улицы: '{street_part}'")
+        # Проверка частичного совпадения номера дома (например, "5" и "5/2" не совпадают)
+        elif street_part == mkd_street and house_number and mkd_house:
+            # Проверяем, является ли номер дома частью другого номера
+            if house_number in mkd_house or mkd_house in house_number:
+                # Только если один номер является частью другого, но это не точное совпадение
+                if house_number != mkd_house:
+                    score = 30
+                    log_info(f"[MKD] Частичное совпадение номера дома: '{house_number}' vs '{mkd_house}'")
+        
+        if score > best_match_score:
+            best_match_score = score
+            best_match = item
+    
+    # Если найдено совпадение с достаточным score
+    if best_match and best_match_score >= 70:  # Минимальный порог 70%
+        log_info(f"[MKD] Найдено совпадение: '{best_match['address']}' (строка {best_match['row']}, score={best_match_score})")
+        
+        # Обновляем статус в МКД
+        update_mkd_status(sheets, best_match['row'])
+        
+        return True, best_match['address']
     
     log_info(f"[MKD] Адрес не найден: {cleaned_address}")
     return False, None
