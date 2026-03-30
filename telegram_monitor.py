@@ -4,6 +4,7 @@
 - Добавлена проверка адреса в листе "Обследование МКД"
 - Функция check_address_in_mkd() для поиска адреса в столбце D
 - При нахождении адреса в таблице добавляется комментарий в колонку M
+- Добавлена проверка существования листа МКД
 """
 
 import asyncio
@@ -146,11 +147,6 @@ COL = {
     'ORIGINAL_STATUS': 18
 }
 
-# Колонки для листа "Обследование МКД"
-MKD_COL = {
-    'ADDRESS': 4  # Столбец D (индекс 4, так как счет с 1)
-}
-
 DISTRICTS = ["ЮЗАО", "ЗАО", "ТРАО", "НМАО"]
 chats_cache = {}
 bot_client = None
@@ -174,6 +170,23 @@ def load_mkd_addresses(sheets):
             return mkd_addresses_cache
     
     try:
+        # Сначала проверяем, существует ли лист
+        spreadsheet = sheets.get(spreadsheetId=SPREADSHEET_ID).execute()
+        sheets_list = spreadsheet.get('sheets', [])
+        
+        sheet_exists = False
+        for sheet in sheets_list:
+            properties = sheet.get('properties', {})
+            if properties.get('title') == MKD_SHEET_NAME:
+                sheet_exists = True
+                break
+        
+        if not sheet_exists:
+            log_warn(f"[MKD] Лист '{MKD_SHEET_NAME}' не найден в таблице. Проверка адресов отключена.")
+            mkd_addresses_cache = []
+            mkd_addresses_cache_time = current_time
+            return []
+        
         log_info(f"[MKD] Загрузка адресов из листа '{MKD_SHEET_NAME}', столбец D")
         
         # Получаем все данные из столбца D
@@ -200,8 +213,18 @@ def load_mkd_addresses(sheets):
         
         return addresses
         
+    except HttpError as e:
+        if e.resp.status == 404:
+            log_warn(f"[MKD] Лист '{MKD_SHEET_NAME}' не найден. Проверка адресов отключена.")
+        else:
+            log_error(f"[MKD] Ошибка загрузки адресов: {e}")
+        mkd_addresses_cache = []
+        mkd_addresses_cache_time = current_time
+        return []
     except Exception as e:
         log_error(f"[MKD] Ошибка загрузки адресов: {e}")
+        mkd_addresses_cache = []
+        mkd_addresses_cache_time = current_time
         return []
 
 def check_address_in_mkd(sheets, address):
@@ -210,6 +233,9 @@ def check_address_in_mkd(sheets, address):
         return False, None
     
     addresses = load_mkd_addresses(sheets)
+    
+    if not addresses:
+        return False, None
     
     # Очищаем адрес от лишних пробелов и приводим к нижнему регистру для сравнения
     clean_address = re.sub(r'\s+', ' ', address.strip().lower())
@@ -716,7 +742,7 @@ async def main():
         sheets = init_google_sheets()
         if sheets:
             add_headers_if_needed(sheets)
-            # Предварительно загружаем адреса из МКД в кэш
+            # Предварительно загружаем адреса из МКД в кэш (если лист существует)
             load_mkd_addresses(sheets)
             log_info("[OK] Подключение к Google Sheets")
         else:
