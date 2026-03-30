@@ -1,7 +1,8 @@
 """
-Версия: 3.5.0-Render (Релиз от 30.03.2026)
+Версия: 3.6.0-Render (Релиз от 30.03.2026)
 Изменения:
 - Добавлена проверка адреса в листе "Обследование МКД"
+- Функция clean_address_for_mkd() очищает адрес от подъездов и этажей
 - Функция check_address_in_mkd() для поиска адреса в столбце D
 - При нахождении адреса в таблице добавляется комментарий в колонку M
 - Добавлена проверка существования листа МКД
@@ -157,6 +158,52 @@ mkd_addresses_cache = None
 mkd_addresses_cache_time = None
 CACHE_DURATION = 3600  # Кэш на 1 час
 
+# ============ ФУНКЦИЯ ОЧИСТКИ АДРЕСА ОТ ПОДЪЕЗДОВ И ЭТАЖЕЙ ============
+def clean_address_for_mkd(address):
+    """
+    Очищает адрес от информации о подъездах и этажах для сравнения с МКД
+    
+    Примеры:
+    "Москва, НМАО, Щербинка, Высотная (Щербинка) улица, 5, 1п., 1 этаж" 
+    -> "Москва, НМАО, Щербинка, Высотная (Щербинка) улица, 5"
+    
+    "Москва, ЮЗАО, Теплый Стан, улица Генерала Тюленева, 39, 16п., 1 этаж"
+    -> "Москва, ЮЗАО, Теплый Стан, улица Генерала Тюленева, 39"
+    """
+    if not address:
+        return ""
+    
+    # Паттерны для удаления информации о подъездах и этажах
+    patterns = [
+        r',\s*\d+п\.?\s*,?\s*',   # удаляет "1п." или "16п." и запятые
+        r',\s*\d+\s*этаж\s*,?\s*', # удаляет "1 этаж" или "2 этаж"
+        r',\s*подв\.?\s*,?\s*',    # удаляет "подв." или "подъезд"
+        r',\s*эт\.?\s*,?\s*',      # удаляет "эт." или "этаж"
+        r',\s*п\.?\s*,?\s*',       # удаляет "п." или "подъезд"
+        r',\s*пом\.?\s*,?\s*',     # удаляет "пом." или "помещение"
+        r',\s*подъезд\s*,?\s*',    # удаляет "подъезд"
+        r',\s*корп\.?\s*,?\s*',    # удаляет "корп." 
+        r',\s*стр\.?\s*,?\s*',     # удаляет "стр."
+    ]
+    
+    cleaned = address
+    
+    for pattern in patterns:
+        cleaned = re.sub(pattern, ',', cleaned)
+    
+    # Удаляем лишние запятые и пробелы
+    cleaned = re.sub(r',\s*,', ',', cleaned)      # удаляем двойные запятые
+    cleaned = re.sub(r'\s*,\s*', ', ', cleaned)   # нормализуем пробелы вокруг запятых
+    cleaned = re.sub(r',\s*$', '', cleaned)       # удаляем запятую в конце
+    cleaned = cleaned.strip()
+    
+    # Если в конце осталось что-то типа "1" - удаляем
+    cleaned = re.sub(r',\s*\d+\s*$', '', cleaned)
+    
+    log_info(f"[MKD] Очистка адреса:\n   Исходный: {address}\n   Очищенный: {cleaned}")
+    
+    return cleaned
+
 # ============ ФУНКЦИЯ ПРОВЕРКИ АДРЕСА В МКД ============
 def load_mkd_addresses(sheets):
     """Загружает все адреса из листа Обследование МКД (столбец D)"""
@@ -232,27 +279,36 @@ def check_address_in_mkd(sheets, address):
     if not address:
         return False, None
     
+    # Очищаем адрес от подъездов и этажей
+    cleaned_address = clean_address_for_mkd(address)
+    
     addresses = load_mkd_addresses(sheets)
     
     if not addresses:
         return False, None
     
-    # Очищаем адрес от лишних пробелов и приводим к нижнему регистру для сравнения
-    clean_address = re.sub(r'\s+', ' ', address.strip().lower())
+    # Нормализуем очищенный адрес
+    clean_addr = re.sub(r'\s+', ' ', cleaned_address.strip().lower())
     
     for mkd_address in addresses:
         clean_mkd = re.sub(r'\s+', ' ', mkd_address.lower())
         
-        # Проверяем полное совпадение или частичное вхождение
-        if clean_address == clean_mkd:
-            log_info(f"[MKD] Найдено точное совпадение: {address}")
+        # Проверяем точное совпадение
+        if clean_addr == clean_mkd:
+            log_info(f"[MKD] Найдено точное совпадение: {cleaned_address}")
             return True, mkd_address
-        elif clean_mkd in clean_address or clean_address in clean_mkd:
-            # Если адрес содержит часть из МКД или наоборот
-            log_info(f"[MKD] Найдено частичное совпадение: '{address}' ~ '{mkd_address}'")
+        
+        # Проверяем, что адрес из МКД содержится в очищенном адресе
+        if clean_mkd in clean_addr:
+            log_info(f"[MKD] Найдено совпадение (МКД в адресе): '{clean_mkd}' в '{clean_addr}'")
+            return True, mkd_address
+        
+        # Проверяем, что очищенный адрес содержится в адресе из МКД
+        if clean_addr in clean_mkd:
+            log_info(f"[MKD] Найдено совпадение (адрес в МКД): '{clean_addr}' в '{clean_mkd}'")
             return True, mkd_address
     
-    log_info(f"[MKD] Адрес не найден: {address}")
+    log_info(f"[MKD] Адрес не найден: {cleaned_address}")
     return False, None
 
 # ============ ВЕБ-СЕРВЕР ============
@@ -309,24 +365,6 @@ def get_sheet_id(sheets):
     except Exception as e:
         log_error(f"Ошибка получения sheetId: {e}")
         return 0
-
-def update_comment_cell(sheets, row, comment_text):
-    """Обновляет комментарий в колонке M (COMMENT) для указанной строки"""
-    try:
-        range_name = f'{SHEET_NAME}!M{row}'
-        body = {'values': [[comment_text]]}
-        
-        sheets.values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_name,
-            valueInputOption='USER_ENTERED',
-            body=body
-        ).execute()
-        log_info(f"[MKD] Комментарий добавлен в строку {row}: {comment_text[:50]}...")
-        return True
-    except Exception as e:
-        log_error(f"Ошибка добавления комментария: {e}")
-        return False
 
 def write_to_google_sheets(sheets, data, is_duplicate=False, mkd_comment=None):
     """Запись данных в Google таблицу"""
@@ -502,6 +540,7 @@ def send_confirmation(user_id, tt, address, district, photo_link, is_duplicate=F
     if tt:
         message_text += f"TT: {tt}\n"
     if address:
+        # Показываем исходный адрес (с подъездом/этажом)
         message_text += f"Адрес: {address}\n"
     if district:
         message_text += f"Округ: {district}\n"
@@ -721,7 +760,7 @@ async def message_handler(event):
 # ============ ОСНОВНАЯ ФУНКЦИЯ ============
 async def main():
     log_info("=" * 70)
-    log_info("Telegram Monitor Bot v3.5.0-Render")
+    log_info("Telegram Monitor Bot v3.6.0-Render")
     log_info("=" * 70)
     log_info(f"[INFO] Google таблица: {SPREADSHEET_ID}")
     log_info(f"[INFO] Лист ТТ: {SHEET_NAME}")
