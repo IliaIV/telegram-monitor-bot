@@ -166,7 +166,7 @@ mkd_addresses_cache_time = None
 CACHE_DURATION = 3600  # Кэш на 1 час
 
 # ============ ФУНКЦИЯ ОЧИСТКИ АДРЕСА ОТ ПОДЪЕЗДОВ И ЭТАЖЕЙ ============
-ddef clean_address_for_mkd(address):
+def clean_address_for_mkd(address):
     """
     Очищает адрес от информации о подъездах и этажах, СОХРАНЯЯ номер дома
     
