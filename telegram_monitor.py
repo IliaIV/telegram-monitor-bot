@@ -168,52 +168,52 @@ CACHE_DURATION = 3600  # Кэш на 1 час
 # ============ ФУНКЦИЯ ОЧИСТКИ АДРЕСА ОТ ПОДЪЕЗДОВ И ЭТАЖЕЙ ============
 def clean_address_for_mkd(address):
     """
-    Очищает адрес от информации о подъездах и этажах, СОХРАНЯЯ номер дома
-    и НЕ трогая сокращения типа "пос.", "п." в составе слов
+    Очищает адрес от информации о подъездах и этажах, СОХРАНЯЯ номер дома и корпус
+    Полностью удаляет: подъезды, этажи (но НЕ корпуса)
     
     Пример:
+    "Москва, НМАО, Внуково, Авиаконструктора Петлякова (поселение Внуковское) ул., 31, 1 п., 1 этаж"
+    -> "Москва, НМАО, Внуково, Авиаконструктора Петлякова (поселение Внуковское) ул., 31"
+    
     "Москва, ТРАО, Михайлово-Ярцевское, пос.Шишкин Лес, 21 корп. 1, 1п., 1 этаж"
     -> "Москва, ТРАО, Михайлово-Ярцевское, пос.Шишкин Лес, 21 корп. 1"
     """
     if not address:
         return ""
     
-    # Сначала сохраняем номер дома и корпус (если есть)
-    # Ищем номер дома с возможным корпусом
-    house_with_corps_pattern = r',\s*(\d+(?:\s*корп\.?\s*\d+)?)'
-    
     # Паттерны для удаления информации о подъездах и этажах
-    # Важно: не трогаем "пос." (поселок) и "п." в составе "площадь"
+    # НЕ трогаем корпуса
     patterns_to_remove = [
-        r',\s*\d+п\.?\s*(?:[^,]*,)?',      # удаляет ", 1п.," но не трогает "пос."
-        r',\s*\d+\s*этаж\s*,?\s*',         # удаляет ", 1 этаж"
-        r',\s*подв\.?\s*,?\s*',            # удаляет ", подв."
-        r',\s*эт\.?\s*,?\s*',              # удаляет ", эт."
-        r',\s*подъезд\s*,?\s*',            # удаляет ", подъезд"
-        r',\s*пом\.?\s*,?\s*',             # удаляет ", пом."
-        r',\s*стр\.?\s*\d*\s*,?\s*',       # удаляет ", стр."
-        r',\s*лит\.?\s*[А-Я]\s*,?\s*',     # удаляет ", лит. А"
+        r',\s*\d+\s*п\.?\s*',           # удаляет ", 1 п." или ", 1п."
+        r',\s*\d+\s*этаж\s*',           # удаляет ", 1 этаж"
+        r',\s*подв\.?\s*',              # удаляет ", подв."
+        r',\s*эт\.?\s*',                # удаляет ", эт."
+        r',\s*подъезд\s*',              # удаляет ", подъезд"
+        r',\s*пом\.?\s*',               # удаляет ", пом."
+        r',\s*стр\.?\s*\d*\s*',         # удаляет ", стр."
+        r',\s*лит\.?\s*[А-Я]\s*',       # удаляет ", лит. А"
     ]
     
     cleaned = address
-    
-    # Удаляем только подъезды и этажи
     for pattern in patterns_to_remove:
         cleaned = re.sub(pattern, ',', cleaned)
     
-    # Удаляем лишние запятые и пробелы
+    # Удаляем лишние запятые и нормализуем пробелы
     cleaned = re.sub(r',\s*,', ',', cleaned)           # удаляем двойные запятые
     cleaned = re.sub(r'\s*,\s*', ', ', cleaned)        # нормализуем пробелы вокруг запятых
     cleaned = re.sub(r',\s*$', '', cleaned)            # удаляем запятую в конце
     cleaned = cleaned.strip()
     
-    # Восстанавливаем "пос." если оно было повреждено
-    cleaned = re.sub(r',\s*ос\.', ', пос.', cleaned)   # исправляем "ос." -> "пос."
-    cleaned = re.sub(r'^\s*ос\.', 'пос.', cleaned)     # исправляем в начале строки
+    # Восстанавливаем "пос." если было повреждено
+    cleaned = re.sub(r',\s*ос\.', ', пос.', cleaned)
+    cleaned = re.sub(r'^\s*ос\.', 'пос.', cleaned)
     
-    # Удаляем пробелы после запятых внутри скобок
+    # Убираем лишние пробелы внутри скобок
     cleaned = re.sub(r'\(\s*', '(', cleaned)
     cleaned = re.sub(r'\s*\)', ')', cleaned)
+    
+    # Убираем лишние пробелы в конце
+    cleaned = cleaned.rstrip(' ,')
     
     log_info(f"[MKD] Очистка адреса:\n   Исходный: {address}\n   Очищенный: {cleaned}")
     
@@ -318,12 +318,12 @@ def update_mkd_status(sheets, row_number):
 def check_and_mark_address_in_mkd(sheets, address):
     """
     Проверяет наличие адреса в листе МКД.
-    Сравнивает адрес ДО номера дома (улица + номер дома), игнорируя корпус, подъезд, этаж
+    Сравнивает адрес без подъездов и этажей, но С КОРПУСОМ
     """
     if not address:
         return False, None
     
-    # Очищаем адрес от подъездов и этажей
+    # Очищаем адрес от подъездов и этажей (корпус сохраняется)
     cleaned_address = clean_address_for_mkd(address)
     
     addresses_with_rows = load_mkd_addresses_with_rows(sheets)
@@ -331,20 +331,11 @@ def check_and_mark_address_in_mkd(sheets, address):
     if not addresses_with_rows:
         return False, None
     
-    # Паттерн для извлечения базового адреса (до номера дома)
-    # Убираем корпус, строение и прочее после номера дома
-    base_pattern = r'^([^,]+(?:,[^,]+){0,4},\s*\d+)(?:[^\d]|$)'
+    # Нормализуем очищенный адрес для сравнения
+    clean_addr = re.sub(r'\s+', ' ', cleaned_address.strip().lower())
+    clean_addr = re.sub(r'\s*,\s*', ',', clean_addr)
     
-    base_match = re.search(base_pattern, cleaned_address)
-    base_address = base_match.group(1) if base_match else cleaned_address
-    
-    # Убираем лишние пробелы
-    base_address = re.sub(r'\s+', ' ', base_address.strip().lower())
-    
-    log_info(f"[MKD] Поиск по базовому адресу: '{base_address}'")
-    
-    best_match = None
-    best_match_score = 0
+    log_info(f"[MKD] Поиск адреса: '{clean_addr}'")
     
     for item in addresses_with_rows:
         # Пропускаем уже выполненные
@@ -352,55 +343,19 @@ def check_and_mark_address_in_mkd(sheets, address):
             continue
         
         clean_mkd = re.sub(r'\s+', ' ', item['address'].lower())
+        clean_mkd = re.sub(r'\s*,\s*', ',', clean_mkd)
         
-        # Извлекаем базовый адрес из адреса МКД (до номера дома)
-        mkd_base_match = re.search(base_pattern, clean_mkd)
-        mkd_base = mkd_base_match.group(1) if mkd_base_match else clean_mkd
+        # Точное сравнение
+        if clean_addr == clean_mkd:
+            log_info(f"[MKD] ТОЧНОЕ СОВПАДЕНИЕ: '{item['address']}' (строка {item['row']})")
+            update_mkd_status(sheets, item['row'])
+            return True, item['address']
         
-        # Проверяем точное совпадение базовых адресов
-        if base_address == mkd_base:
-            log_info(f"[MKD] Точное совпадение: '{item['address']}'")
-            best_match = item
-            best_match_score = 100
-            break
-        
-        # Если не точное, проверяем частичное совпадение (улица + номер)
-        # Извлекаем номер дома из базового адреса
-        house_pattern = r',\s*(\d+(?:[\/\-]\d+)?)\s*$'
-        house_match = re.search(house_pattern, base_address)
-        house_number = house_match.group(1) if house_match else ""
-        
-        street_part = re.sub(house_pattern, '', base_address).strip() if house_match else base_address
-        
-        # Извлекаем номер дома из МКД
-        mkd_house_match = re.search(house_pattern, mkd_base)
-        mkd_house = mkd_house_match.group(1) if mkd_house_match else ""
-        mkd_street = re.sub(house_pattern, '', mkd_base).strip() if mkd_house_match else mkd_base
-        
-        # Проверка совпадения улицы и номера дома
-        if street_part == mkd_street and house_number == mkd_house:
-            score = 95
-            log_info(f"[MKD] Совпадение улицы и дома: '{street_part}', дом {house_number}")
-            if score > best_match_score:
-                best_match_score = score
-                best_match = item
-        
-        # Проверка только улицы (если номера домов не указаны)
-        elif street_part == mkd_street and (not house_number or not mkd_house):
-            score = 70
-            log_info(f"[MKD] Совпадение улицы: '{street_part}'")
-            if score > best_match_score:
-                best_match_score = score
-                best_match = item
-    
-    # Если найдено совпадение
-    if best_match and best_match_score >= 90:
-        log_info(f"[MKD] Найдено совпадение: '{best_match['address']}' (строка {best_match['row']}, score={best_match_score})")
-        
-        # Обновляем статус в МКД
-        update_mkd_status(sheets, best_match['row'])
-        
-        return True, best_match['address']
+        # Сравнение без учета лишних пробелов и запятых
+        if clean_addr.replace(',', '') == clean_mkd.replace(',', ''):
+            log_info(f"[MKD] СОВПАДЕНИЕ (без запятых): '{item['address']}' (строка {item['row']})")
+            update_mkd_status(sheets, item['row'])
+            return True, item['address']
     
     log_info(f"[MKD] Адрес не найден: {cleaned_address}")
     return False, None
